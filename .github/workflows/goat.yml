@@ -1,0 +1,70 @@
+name: GOAT Geant4 (2026.10.30_Paper10.1_iso-1e8_Geant4)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode: {description: 'normal | rescue', required: true, default: 'normal', type: string}
+      jobs: {description: 'rescue: job_id cách nhau dấu phẩy', required: false, default: '', type: string}
+      drive_root: {description: 'Drive root folder id (tham khảo)', required: false, default: '', type: string}
+
+jobs:
+  run:
+    name: Runner ${{ matrix.runner_id }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        runner_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+    steps:
+      - name: Mark job start (GOAT đo thời gian setup)
+        run: echo "GOAT_T0=$(date +%s)" >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@v4
+
+      - name: Install Geant4 (micromamba conda-forge)
+        shell: bash
+        run: |
+          curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest | tar -xj bin/micromamba -O > /tmp/micromamba
+          chmod +x /tmp/micromamba
+          /tmp/micromamba create -y -q -p /tmp/env -c conda-forge \
+            geant4 expat zlib freetype cmake make gxx_linux-64 \
+            python=3.11 pyyaml pandas numpy openpyxl requests \
+            google-api-python-client google-auth google-auth-httplib2
+
+      - name: Build every sim/<sub>/ that has CMakeLists.txt
+        shell: bash
+        run: |
+          # activate nạp G4ENSDFSTATEDATA, G4LEDATA, ... (thiếu => Geant4 abort PART70000)
+          eval "$(/tmp/micromamba shell hook --shell bash)"
+          micromamba activate /tmp/env
+          export PATH="/tmp/env/bin:$PATH"
+          export LD_LIBRARY_PATH="/tmp/env/lib:$LD_LIBRARY_PATH"
+          for d in sim/*/; do
+            [ -f "$d/CMakeLists.txt" ] || continue
+            echo ">>> build $d"
+            mkdir -p "$d/build" && cd "$d/build"
+            cmake .. -DCMAKE_PREFIX_PATH=/tmp/env \
+              -DCMAKE_CXX_COMPILER=$(ls /tmp/env/bin/x86_64-conda-linux-gnu-g++) \
+              -DCMAKE_C_COMPILER=$(ls /tmp/env/bin/x86_64-conda-linux-gnu-gcc) \
+              -DCMAKE_EXE_LINKER_FLAGS="-Wl,-rpath,/tmp/env/lib -L/tmp/env/lib" \
+              -DCMAKE_IGNORE_PATH="/usr/lib/x86_64-linux-gnu;/usr/lib;/lib/x86_64-linux-gnu;/lib;/usr/include"
+            make -j$(nproc)
+            cd - > /dev/null
+          done
+
+      - name: Run GOAT worker
+        shell: bash
+        env:
+          GDRIVE_OAUTH_JSON: ${{ secrets.GDRIVE_OAUTH_JSON }}
+          GOAT_MODE: ${{ inputs.mode }}
+          GOAT_JOBS: ${{ inputs.jobs }}
+        run: |
+          # activate nạp G4ENSDFSTATEDATA, G4LEDATA, ... (thiếu => Geant4 abort PART70000)
+          eval "$(/tmp/micromamba shell hook --shell bash)"
+          micromamba activate /tmp/env
+          export PATH="/tmp/env/bin:$PATH"
+          export LD_LIBRARY_PATH="/tmp/env/lib:$LD_LIBRARY_PATH"
+          env | grep -E "^G4[A-Z]+DATA=" || { echo "THIẾU biến dữ liệu Geant4"; exit 1; }
+          python -u -m goat.worker --account "${{ github.repository_owner }}" \
+            --runner-id ${{ matrix.runner_id }} --mode "$GOAT_MODE" --jobs "$GOAT_JOBS"
